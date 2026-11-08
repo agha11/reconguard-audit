@@ -51,11 +51,22 @@ def audit_statement(df_raw):
     col_map = {col: str(col).strip() for col in df.columns}
     df.rename(columns=col_map, inplace=True)
     
-    # Detect Standard Banking Columns (Agnostic to Currency / Bank Format)
-    debit_col = next((c for c in df.columns if any(k in c.lower() for k in ["debit", "withdrawal", "paid out", "dr"])), None)
-    credit_col = next((c for c in df.columns if any(k in c.lower() for k in ["credit", "deposit", "paid in", "cr"])), None)
+    # Identify Description and Balance first to prevent cross-contamination
+    desc_col = next((c for c in df.columns if any(k in c.lower() for k in ["desc", "particular", "narrative", "detail", "transaction", "memo"])), None)
     balance_col = next((c for c in df.columns if any(k in c.lower() for k in ["balance", "running bal", "closing"])), None)
-    desc_col = next((c for c in df.columns if any(k in c.lower() for k in ["desc", "particular", "narrative", "detail", "transaction"])), None)
+    
+    # Identify Debit (ensure it is not Description or Balance, and use word boundary for dr)
+    debit_col = next((c for c in df.columns if c not in [desc_col, balance_col] and (
+        any(k in c.lower() for k in ["debit", "withdrawal", "paid out", "outflow", "spent"]) or 
+        re.search(r"\bdr\b", c.lower())
+    )), None)
+    
+    # Identify Credit (ensure it is not Description or Balance, and use word boundary for cr)
+    credit_col = next((c for c in df.columns if c not in [desc_col, balance_col] and (
+        any(k in c.lower() for k in ["credit", "deposit", "paid in", "inflow", "received"]) or 
+        re.search(r"\bcr\b", c.lower())
+    )), None)
+    
     date_col = next((c for c in df.columns if any(k in c.lower() for k in ["date", "posting", "trans date"])), df.columns[0])
     
     if not all([debit_col, credit_col, balance_col, desc_col]):
@@ -66,7 +77,7 @@ def audit_statement(df_raw):
     df[credit_col] = pd.to_numeric(df[credit_col], errors="coerce").fillna(0.0)
     df[balance_col] = pd.to_numeric(df[balance_col], errors="coerce")
     
-    # Exclude trailing empty rows
+    # Exclude trailing empty balance rows
     df = df.dropna(subset=[balance_col]).reset_index(drop=True)
     
     # 2. Row-by-Row Mathematical Continuity Check: B(t) = B(t-1) - Debit + Credit
@@ -101,7 +112,6 @@ def audit_statement(df_raw):
     df["Audit Status"] = audit_statuses
     
     # 3. Global NSF Check / Dishonoured Reversal Detection
-    # Safe boundary regex avoids false triggers on regular "transfer" descriptions
     nsf_mask = df[desc_col].astype(str).str.contains(r"RETURNED CHEQUE|RETURNED CHECK|\bNSF\b|BOUNCED|DISHONO", case=False, na=False)
     nsf_rows = df[nsf_mask]
     
@@ -120,7 +130,6 @@ def audit_statement(df_raw):
         fee_amt = bank_charges[debit_col].sum() if not bank_charges.empty else 0.0
         dep_date = str(original_dep[date_col].iloc[0]) if not original_dep.empty else "N/A"
         
-        # Debtor entity identification
         debtor_match = re.search(r"[-/:]\s*([A-Za-z0-9\s&]+(?:LLC|INC|LTD|CORP|CO|GROUP|TRADING|FZCO|FZE|ENTERPRISE))", desc, re.IGNORECASE)
         debtor_name = debtor_match.group(1).strip() if debtor_match else "Commercial Debtor"
         
@@ -282,7 +291,6 @@ if uploaded_file is not None:
                     if not df_nsf.empty:
                         df_nsf.to_excel(writer, sheet_name="Credit_Risk_Alerts", index=False)
                     
-                    # Auto-fit column widths across all sheets
                     for sheetname in writer.sheets:
                         ws = writer.sheets[sheetname]
                         for col in ws.columns:
